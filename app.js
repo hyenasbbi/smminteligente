@@ -194,7 +194,8 @@ function updateSelectedCount(){const x=document.getElementById('selectedCount');
 async function copySelected(){
   if(!selected.size)return;
   const arr=[...selected.values()];
-  const text=arr.map(s=>`${s.function_label} ${s.panel_code} ID ${s.service_code}`).join('\n');
+  const prefix=seller?.short_code || (profile?.role==='admin'?'ADMIN':'');
+  const text=arr.map(s=>`${prefix?prefix+' ':''}${s.function_label} ${s.panel_code} ID ${s.service_code}`).join('\n');
   await navigator.clipboard.writeText(text);
   await sb.from('smm_copy_events').insert(arr.map(s=>({user_id:session.user.id,service_id:s.service_id})));
   const btn=document.getElementById('copySelected'); if(btn){btn.textContent='COPIADO ✓';setTimeout(()=>btn.textContent='COPIAR SELECCIÓN',1200)}
@@ -235,7 +236,16 @@ async function renderTop(){
 
 async function renderAdmin(){
   const main=document.getElementById('main'); if(profile.role!=='admin'){return renderHome();}
-  main.innerHTML=`<section class="hero"><div><h1>Administración</h1><p>Usuarios pendientes, activos y control de accesos.</p></div></section><div class="admin-grid"><div class="card admin-card"><h3>Solicitudes pendientes</h3><div id="pending">Cargando...</div></div><div class="card admin-card"><h3>Usuarios</h3><div id="users">Cargando...</div></div></div>`;
+  main.innerHTML=`<section class="hero"><div><h1>Administración</h1><p>Usuarios, accesos y sincronización de paneles SMM.</p></div></section>
+  <div class="card admin-card" style="margin-bottom:18px">
+    <div style="display:flex;gap:16px;align-items:center;justify-content:space-between;flex-wrap:wrap">
+      <div><h3 style="margin:0 0 6px">Sincronización SMM</h3><div class="small">JAP · HON · FLW · BLKM → Instagram</div></div>
+      <button class="primary" id="syncPanels">SINCRONIZAR PANELES</button>
+    </div>
+    <div id="syncResult" class="small" style="margin-top:14px">Todavía no ejecutaste una sincronización desde esta sesión.</div>
+  </div>
+  <div class="admin-grid"><div class="card admin-card"><h3>Solicitudes pendientes</h3><div id="pending">Cargando...</div></div><div class="card admin-card"><h3>Usuarios</h3><div id="users">Cargando...</div></div></div>`;
+  document.getElementById('syncPanels').onclick=syncPanels;
   const [{data:profiles,error},{data:sellers}]=await Promise.all([sb.from('smm_user_profiles').select('*').order('created_at',{ascending:false}),sb.from('smm_sellers').select('*').order('name')]);
   if(error){document.getElementById('pending').textContent=error.message;return;}
   const smap=new Map((sellers||[]).map(s=>[s.id,s]));
@@ -244,6 +254,33 @@ async function renderAdmin(){
   document.getElementById('users').innerHTML=(profiles||[]).filter(p=>p.status!=='pending').map(p=>`<div class="request"><div><b>${esc(smap.get(p.assigned_seller_id)?.name||'Sin vendedor')}</b><div class="small">${esc(p.email_norm)} · ${esc(p.status)} · ${esc(p.role)}</div></div><div class="request-actions">${p.status==='active'?`<button data-suspend="${p.user_id}">Suspender</button><button class="bad" data-expel="${p.user_id}">Expulsar</button>`:''}${p.status==='suspended'?`<button class="ok" data-reactivate="${p.user_id}">Reactivar</button>`:''}</div></div>`).join('')||'Sin usuarios.';
   wireAdmin();
 }
+
+async function syncPanels(){
+  const btn=document.getElementById('syncPanels');
+  const box=document.getElementById('syncResult');
+  if(!btn || !box) return;
+  btn.disabled=true;
+  btn.textContent='SINCRONIZANDO...';
+  box.textContent='Consultando JAP, HON, FLW y BLKM. Puede tardar unos segundos...';
+  try{
+    const {data,error}=await sb.functions.invoke('smm-sync-services',{body:{source:'admin-ui'}});
+    if(error) throw error;
+    const results=data?.results||[];
+    box.innerHTML=results.length ? results.map(r=>{
+      const status=r.ok?'✓':'✕';
+      const detail=r.ok ? `Traídos: ${r.fetched??0} · Instagram: ${r.instagram??0} · Precios nuevos/cambiados: ${r.changedPrices??0}` : esc(r.error||'Error desconocido');
+      return `<div style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,.08)"><b>${status} ${esc(r.provider)}</b> · ${detail}</div>`;
+    }).join('') : 'La función respondió sin resultados.';
+    const {count}=await sb.from('smm_services').select('*',{count:'exact',head:true}).eq('platform','Instagram');
+    box.innerHTML += `<div style="padding-top:10px"><b>Total Instagram guardados: ${count??0}</b></div>`;
+  }catch(e){
+    box.textContent='Error de sincronización: '+(e?.message||String(e));
+  }finally{
+    btn.disabled=false;
+    btn.textContent='SINCRONIZAR PANELES';
+  }
+}
+
 function adminRequest(p,smap){
   const req=smap.get(p.requested_seller_id);
   return `<div class="request"><div><b>${esc(req?.name||'Sin vendedor')}</b><div class="small">${esc(p.email_norm)}</div></div><div class="request-actions"><button class="ok" data-approve="${p.user_id}" data-seller="${p.requested_seller_id||''}">Aprobar</button><button class="bad" data-reject="${p.user_id}">Rechazar</button></div></div>`;
