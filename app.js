@@ -1,0 +1,405 @@
+const SUPABASE_URL = 'https://jgjvzqfxakvogaeqfual.supabase.co';
+const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_ylZfwhV3QQ98wG9qLiL7Jg_vTLaLByl';
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
+const app = document.getElementById('app');
+
+let session = null;
+let profile = null;
+let seller = null;
+let currentView = 'home';
+let currentCategory = null;
+let currentSubcategory = 'STANDARD';
+let currentServices = [];
+let selected = new Map();
+let favorites = new Set();
+
+const CATS = [
+  ['LIKES','Likes'],['COMMENTS','Comments'],['VIEWS','Views'],['SHARES','Shares'],
+  ['REPOST','Reposts'],['FOLLOWERS','Followers'],['SAVES','Saves'],['STORY VIEWS','Story Views']
+];
+
+const esc = s => String(s ?? '').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+const money = v => v == null ? '—' : '$' + Number(v).toFixed(4).replace(/0+$/,'').replace(/\.$/,'');
+const sec = v => {
+  if(v == null) return '—';
+  const n=Number(v); if(n<60) return `${Math.round(n)}s`; if(n<3600) return `${Math.round(n/60)} min`; return `${(n/3600).toFixed(1)} h`;
+};
+const pct = v => v == null ? '—' : `${Number(v).toFixed(1)}%`;
+
+async function init(){
+  const {data:{session:s}} = await sb.auth.getSession();
+  session=s;
+  if(!session) return renderAuth('login');
+  await routeLoggedIn();
+}
+
+async function routeLoggedIn(){
+  const {data:p,error} = await sb.from('smm_user_profiles').select('*').eq('user_id',session.user.id).maybeSingle();
+  if(error || !p) return renderBlack('Cuenta pendiente','Tu cuenta fue creada, pero todavía no tiene un perfil habilitado.');
+  profile=p;
+  if(profile.status!=='active'){
+    const titles={pending:'Aprobación pendiente',suspended:'Acceso suspendido',expelled:'Acceso bloqueado',rejected:'Solicitud rechazada'};
+    return renderBlack(titles[profile.status]||'Sin acceso', profile.status==='pending'?'Tu solicitud está esperando aprobación del administrador.':'No tenés acceso al sistema en este momento.');
+  }
+  if(profile.assigned_seller_id){
+    const {data:s}=await sb.from('smm_sellers').select('*').eq('id',profile.assigned_seller_id).single(); seller=s;
+  }
+  await loadFavorites();
+  currentView = favorites.size ? 'favorites' : 'home';
+  renderShell();
+}
+
+function renderAuth(mode='login'){
+  app.innerHTML=`<div class="authwrap"><div class="authcard">
+    <div class="brand"><span>BBI COMPANY</span></div>
+    <h1>${mode==='login'?'Ingresar':'Crear cuenta'}</h1>
+    <p>${mode==='login'?'Acceso interno del equipo.':'Elegí tu nombre. La cuenta quedará pendiente hasta ser aprobada.'}</p>
+    <div class="field"><label>Email</label><input id="email" type="email" autocomplete="email"></div>
+    <div class="field"><label>Contraseña</label><input id="password" type="password" autocomplete="${mode==='login'?'current-password':'new-password'}"></div>
+    ${mode==='signup'?'<div class="field"><label>Vendedor</label><select id="sellerSelect"><option>Cargando...</option></select></div>':''}
+    <button class="primary" id="authBtn">${mode==='login'?'Ingresar':'Crear cuenta'}</button>
+    <div id="authMsg" class="msg"></div>
+    <div class="authswitch">${mode==='login'?'¿No tenés cuenta? <button id="switch">Registrarme</button>':'¿Ya tenés cuenta? <button id="switch">Ingresar</button>'}</div>
+  </div></div>`;
+  document.getElementById('switch').onclick=()=>renderAuth(mode==='login'?'signup':'login');
+  if(mode==='signup') loadAvailableSellers();
+  document.getElementById('authBtn').onclick=()=> mode==='login'?login():signup();
+}
+
+async function loadAvailableSellers(){
+  const sel=document.getElementById('sellerSelect');
+  const {data,error}=await sb.from('smm_sellers').select('id,name,short_code').order('name');
+  if(error){sel.innerHTML='<option>No disponible</option>';return;}
+  sel.innerHTML=(data||[]).map(s=>`<option value="${esc(s.short_code)}">${esc(s.name)}</option>`).join('')||'<option>No hay vendedores disponibles</option>';
+}
+
+async function login(){
+  const email=document.getElementById('email').value.trim(), password=document.getElementById('password').value;
+  const msg=document.getElementById('authMsg'); msg.textContent='Ingresando...';
+  const {data,error}=await sb.auth.signInWithPassword({email,password});
+  if(error){msg.textContent=error.message;return;} session=data.session; await routeLoggedIn();
+}
+async function signup(){
+  const email=document.getElementById('email').value.trim(), password=document.getElementById('password').value, code=document.getElementById('sellerSelect').value;
+  const msg=document.getElementById('authMsg'); msg.textContent='Creando cuenta...';
+  const {data,error}=await sb.auth.signUp({email,password,options:{data:{requested_seller_code:code}}});
+  if(error){msg.textContent=error.message;return;}
+  if(!data.session){msg.textContent='Cuenta creada. Revisá tu email si Supabase solicita confirmación. Después tu acceso quedará pendiente de aprobación.';return;}
+  session=data.session; await routeLoggedIn();
+}
+
+function renderBlack(title,text){
+  app.innerHTML=`<div class="blackstate"><div class="inner"><div class="brand"><span>BBI COMPANY</span></div><h2>${esc(title)}</h2><p>${esc(text)}</p><button class="ghost" id="logout">Cerrar sesión</button></div></div>`;
+  document.getElementById('logout').onclick=logout;
+}
+
+function renderShell(){
+  app.innerHTML=`<div class="shell">
+    <div class="topbar"><div class="brand"><span>BBI COMPANY</span> · SMM INTELLIGENCE</div><div class="userbox"><b>${esc(seller?.name||'ADMIN')}</b><button class="ghost" id="logout">Salir</button></div></div>
+    <div class="nav">
+      <button data-view="home">Inicio</button><button data-view="favorites">Favoritos</button><button data-view="top">Top 7 días</button>${profile.role==='admin'?'<button data-view="admin">Administración</button>':''}
+    </div><main id="main"></main></div>`;
+  document.getElementById('logout').onclick=logout;
+  document.querySelectorAll('.nav button').forEach(b=>b.onclick=()=>{currentView=b.dataset.view;renderCurrent();});
+  renderCurrent();
+}
+
+function markNav(){document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.view===currentView));}
+async function renderCurrent(){
+  markNav(); selected.clear();
+  if(currentView==='home') return renderHome();
+  if(currentView==='favorites') return renderFavorites();
+  if(currentView==='top') return renderTop();
+  if(currentView==='admin') return renderAdmin();
+}
+
+function renderHome(){
+  const main=document.getElementById('main');
+  main.innerHTML=`<section class="hero"><div><h1>Bienvenido, <span class="gradient">${esc(seller?.name||'Admin')}</span></h1><p>Elegí qué querés buscar. El sistema mostrará hasta 15 opciones globales mezclando paneles y priorizando rendimiento.</p></div></section>
+  <div class="categories">${CATS.map(([v,l])=>`<button class="cat" data-cat="${esc(v)}"><b>${esc(l)}</b><span>Ver mejores opciones</span></button>`).join('')}</div>
+  <div id="serviceArea"></div>`;
+  document.querySelectorAll('.cat').forEach(b=>b.onclick=()=>loadCategory(b.dataset.cat));
+}
+
+async function loadCategory(cat){
+  currentCategory=cat; currentSubcategory='STANDARD'; const area=document.getElementById('serviceArea');
+  area.innerHTML='<div class="empty">Cargando servicios...</div>';
+  const {data,error}=await sb.from('smm_service_live_cards').select('*').ilike('platform','%instagram%').eq('function_label',cat).limit(1000);
+  if(error){area.innerHTML=`<div class="empty">${esc(error.message)}</div>`;return;}
+  currentServices=data||[]; renderServiceArea(currentServices,cat);
+}
+
+function healthRank(s){return s==='green'?0:s==='yellow'?1:2}
+function serviceText(s){return `${s.exact_service_name||''} ${s.source_category||''} ${s.quality||''} ${s.country||''}`.toLowerCase();}
+function isInstagramService(s){const t=serviceText(s);if(t.includes('instagram'))return true;return /\big\b/.test(t)&&/(like|comment|view|share|repost|save|follower|story|reel|live|reach|impression)/.test(t);}
+function isLowPopularity(s){
+  const t=serviceText(s);
+  return /low\s*popularity|low\s*popular|low\s*demand|not\s*popular|unpopular|poor\s*popularity|very\s*low\s*demand/.test(t);
+}
+function isBestSeller(s){
+  const t=serviceText(s);
+  return /best\s*seller|bestseller|best-selling|most\s*popular|top\s*seller|hot\s*seller|popular\s*service/.test(t);
+}
+const GEO_RX=/\b(usa|u\.?s\.?a\.?|united states|us likes|united kingdom|uk|uae|dubai|canada|australia|germany|france|italy|spain|brazil|argentina|mexico|california|new york|texas|florida|miami|los angeles|chicago|houston|dallas|austin|boston|seattle|nevada|arizona|georgia|ohio|pennsylvania|new jersey|virginia|colorado|washington)\b/i;
+function isTargeted(s){
+  const t=serviceText(s);
+  return /targeted|target\b|geo\s*target|country\s*target|audience\s*target|location\s*target/.test(t) || GEO_RX.test(t);
+}
+function isHQ(s){
+  const t=serviceText(s);
+  return /\bhq\b|high\s*quality|premium\s*quality|premium\b|real\s*(users|people|accounts|likes|followers|views)|active\s*(users|accounts)/.test(t);
+}
+function serviceSubcategory(s){
+  if(isTargeted(s))return 'TARGETED';
+  if(isHQ(s))return 'HQ';
+  return 'STANDARD';
+}
+const SUBCATS={
+  HQ:{label:'HQ',desc:'Alta calidad · Premium · Real'},
+  STANDARD:{label:'Standard',desc:'Normales · económicos · buen volumen'},
+  TARGETED:{label:'Targeted',desc:'USA · países · estados · geo target'}
+};
+function categoryMedianPrice(items){
+  const vals=items.map(x=>Number(x.current_price)).filter(Number.isFinite).sort((a,b)=>a-b);
+  if(!vals.length)return null;
+  const m=Math.floor(vals.length/2);
+  return vals.length%2?vals[m]:(vals[m-1]+vals[m])/2;
+}
+function capacityScore(s,cat){
+  const max=Number(s.max_qty), min=Number(s.min_qty);
+  let score=0;
+  if(Number.isFinite(max)){
+    if(cat==='FOLLOWERS'){
+      if(max>=100000)score+=15; else if(max>=50000)score+=12; else if(max>=10000)score+=7; else if(max>=5000)score+=3; else if(max<1000)score-=18; else if(max<2500)score-=9;
+    }else{
+      if(max>=100000)score+=5; else if(max>=10000)score+=2; else if(max<500)score-=5;
+    }
+  }
+  if(Number.isFinite(min) && min<=100)score+=2;
+  return score;
+}
+function desirabilityScore(s,medianPrice,cat=currentCategory,sub=currentSubcategory){
+  let score=0;
+  if(s.health_status==='green')score+=36; else if(s.health_status==='yellow')score+=10; else score-=70;
+  if(isBestSeller(s))score+=28;
+  if(sub==='TARGETED' && isTargeted(s))score+=24;
+  if(sub==='HQ' && isHQ(s))score+=20;
+  score+=capacityScore(s,cat);
+
+  const price=Number(s.current_price);
+  if(medianPrice && Number.isFinite(price)){
+    const ratio=price/medianPrice;
+    if(sub==='STANDARD'){
+      // En Standard buscamos precio bajo sin sacrificar salud.
+      if(ratio<=0.55)score+=18; else if(ratio<=0.85)score+=13; else if(ratio<=1.15)score+=7; else if(ratio>1.8)score-=10;
+    }else if(sub==='HQ'){
+      // HQ: premiar precio medio/razonable, no necesariamente el mínimo.
+      if(ratio>=0.65 && ratio<=1.35)score+=15; else if(ratio>=0.45 && ratio<=1.7)score+=7; else if(ratio>2.5)score-=7;
+    }else if(sub==='TARGETED'){
+      // Targeted suele ser caro: el precio pesa poco y nunca domina el ranking.
+      if(ratio<=1.4)score+=6; else if(ratio<=2.5)score+=3; else if(ratio>5)score-=3;
+    }
+  }
+  const start=Number(s.avg_start_seconds);
+  if(Number.isFinite(start)) score += Math.max(-22,13-(start/300));
+  const completion=Number(s.avg_completion_seconds);
+  if(Number.isFinite(completion)) score += Math.max(-16,10-(completion/1800));
+  const bbi=Number(s.bbi_score); if(Number.isFinite(bbi)) score+=Math.min(20,bbi/5);
+  return score;
+}
+function comparePrice(a,b){return Number(a.current_price??1e15)-Number(b.current_price??1e15)||healthRank(a.health_status)-healthRank(b.health_status)}
+function subcategoryCounts(data){
+  const base=data.filter(s=>isInstagramService(s)&&!isLowPopularity(s));
+  return {HQ:base.filter(s=>serviceSubcategory(s)==='HQ').length,STANDARD:base.filter(s=>serviceSubcategory(s)==='STANDARD').length,TARGETED:base.filter(s=>serviceSubcategory(s)==='TARGETED').length};
+}
+function renderSubcategoryTabs(data,cat){
+  const counts=subcategoryCounts(data);
+  return `<div class="subcats">${Object.entries(SUBCATS).map(([key,x])=>`<button class="subcat ${currentSubcategory===key?'active':''}" data-sub="${key}"><b>${x.label}</b><span>${x.desc}</span><em>${counts[key]||0}</em></button>`).join('')}</div>`;
+}
+function renderServiceArea(data,cat,sort='best'){
+  const area=document.getElementById('serviceArea'); if(!area)return;
+  const eligible=[...data].filter(s=>isInstagramService(s) && !isLowPopularity(s) && serviceSubcategory(s)===currentSubcategory);
+  const median=categoryMedianPrice(eligible);
+  let sorted=sort==='price'
+    ? eligible.sort(comparePrice).slice(0,15)
+    : eligible.sort((a,b)=>desirabilityScore(b,median,cat,currentSubcategory)-desirabilityScore(a,median,cat,currentSubcategory) || comparePrice(a,b)).slice(0,15);
+  const sub=SUBCATS[currentSubcategory];
+  area.innerHTML=`${renderSubcategoryTabs(data,cat)}<div class="toolbar"><div><div class="label">Resultados</div><b>${esc(cat)} · ${esc(sub.label)} · hasta 15 tops</b><div class="small">${esc(sub.desc)}${cat==='FOLLOWERS'?' · el límite máximo del servicio también suma al ranking':''}</div></div><div><div class="label">Ordenar</div><select id="sortSelect"><option value="best">Mejor rendimiento</option><option value="price" ${sort==='price'?'selected':''}>Precio: menor a mayor</option></select></div><button class="ghost" id="refresh">Actualizar</button></div>${renderServices(sorted)}${copyBar()}`;
+  document.querySelectorAll('.subcat').forEach(b=>b.onclick=()=>{currentSubcategory=b.dataset.sub;selected.clear();renderServiceArea(data,cat,'best');});
+  document.getElementById('sortSelect').onchange=e=>renderServiceArea(data,cat,e.target.value);
+  document.getElementById('refresh').onclick=()=>loadCategory(cat);
+  wireServiceInteractions(sorted);
+}
+
+function renderServices(items){
+  if(!items.length)return '<div class="card empty">Todavía no hay servicios sincronizados para esta categoría.</div>';
+  return `<div class="service-list">${items.map(s=>serviceCard(s)).join('')}</div>`;
+}
+function serviceCard(s){
+  const change=s.price_change_pct==null?'—':`${Number(s.price_change_pct)>0?'+':''}${Number(s.price_change_pct).toFixed(1)}%`;
+  return `<article class="service" data-service="${s.service_id}">
+    <div class="service-head">
+      <input class="check" type="checkbox" data-id="${s.service_id}">
+      <div><div class="service-title">${esc(s.function_label)} · ${esc(s.panel_code)} · ID ${esc(s.service_code)} <span class="statusdot ${esc(s.health_status)}"></span>${serviceSubcategory(s)==='TARGETED'?'<span class="tag target">TARGETED</span>':''}${serviceSubcategory(s)==='HQ'?'<span class="tag hq">HQ</span>':''}${serviceSubcategory(s)==='STANDARD'?'<span class="tag standard">STANDARD</span>':''}${isBestSeller(s)?'<span class="tag hot">BEST SELLER</span>':''}</div><div class="small">Start ${sec(s.avg_start_seconds)}</div></div>
+      <div class="metric-mini hide-sm">${money(s.current_price)}/1K</div>
+      <div class="metric-mini hide-sm">Avg ${sec(s.avg_completion_seconds)}</div>
+      <div class="metric-mini hide-sm">${s.health_status==='red'?'ALERTA':s.health_status==='yellow'?'CAMBIANDO':'ESTABLE'}</div>
+      <div>⌄</div>
+    </div>
+    <div class="service-details">
+      <div class="exact-name"><b>Nombre exacto del panel</b><br>${esc(s.exact_service_name||'No disponible')}</div>
+      <div class="detail-grid">
+        <div class="detail"><div class="k">Precio actual</div><div class="v">${money(s.current_price)}</div></div>
+        <div class="detail"><div class="k">Precio anterior</div><div class="v">${money(s.previous_price)}</div></div>
+        <div class="detail"><div class="k">Variación</div><div class="v">${change}</div></div>
+        <div class="detail"><div class="k">Start time</div><div class="v">${sec(s.avg_start_seconds)}</div></div>
+        <div class="detail"><div class="k">Average time</div><div class="v">${sec(s.avg_completion_seconds)}</div></div>
+        <div class="detail"><div class="k">Success</div><div class="v">${pct(s.success_rate)}</div></div>
+        <div class="detail"><div class="k">Drop 7d</div><div class="v">${pct(s.avg_drop_7d)}</div></div>
+        <div class="detail"><div class="k">Refill</div><div class="v">${s.refill===true?'Sí':s.refill===false?'No':'—'}</div></div>
+        <div class="detail"><div class="k">Min / Max</div><div class="v">${s.min_qty??'—'} / ${s.max_qty??'—'}</div></div>
+        <div class="detail"><div class="k">País</div><div class="v">${esc(s.country||'—')}</div></div>
+        <div class="detail"><div class="k">Categoría panel</div><div class="v">${esc(s.source_category||'—')}</div></div>
+        <div class="detail"><div class="k">BBI Score</div><div class="v">${s.bbi_score??'—'}</div></div>
+        <div class="detail"><div class="k">Última actualización</div><div class="v">${s.last_synced_at?new Date(s.last_synced_at).toLocaleString():'—'}</div></div>
+      </div>
+      <div class="actions"><button class="mini-btn favorite" data-fav="${s.service_id}">${favorites.has(s.service_id)?'★ Quitar favorito':'☆ Agregar favorito'}</button></div>
+    </div>
+  </article>`;
+}
+function copyBar(){return `<div class="copybar"><div><b id="selectedCount">0 seleccionadas</b><div class="small">Se copiarán juntas</div></div><button id="copySelected">COPIAR SELECCIÓN</button></div>`}
+
+function wireServiceInteractions(items){
+  document.querySelectorAll('.service-head').forEach(h=>h.onclick=e=>{if(e.target.matches('input'))return;h.closest('.service').classList.toggle('open')});
+  document.querySelectorAll('.check').forEach(c=>c.onchange=()=>{const s=items.find(x=>x.service_id===c.dataset.id);if(c.checked)selected.set(s.service_id,s);else selected.delete(s.service_id);updateSelectedCount();});
+  document.querySelectorAll('[data-fav]').forEach(b=>b.onclick=async e=>{e.stopPropagation();const s=items.find(x=>x.service_id===b.dataset.fav);await toggleFavorite(s);});
+  const cp=document.getElementById('copySelected'); if(cp)cp.onclick=copySelected;
+}
+function updateSelectedCount(){const x=document.getElementById('selectedCount');if(x)x.textContent=`${selected.size} seleccionadas`}
+
+async function copySelected(){
+  if(!selected.size)return;
+  const arr=[...selected.values()];
+  const text=arr.map(s=>`${s.function_label} ${s.panel_code} ID ${s.service_code}`).join('\n');
+  await navigator.clipboard.writeText(text);
+  await sb.from('smm_copy_events').insert(arr.map(s=>({user_id:session.user.id,service_id:s.service_id})));
+  const btn=document.getElementById('copySelected'); if(btn){btn.textContent='COPIADO ✓';setTimeout(()=>btn.textContent='COPIAR SELECCIÓN',1200)}
+}
+
+async function loadFavorites(){
+  let q=sb.from('smm_seller_favorite_services').select('service_id').eq('is_favorite',true);
+  if(profile?.role==='admin' && !profile?.assigned_seller_id) q=q.eq('seller_code','ADMIN');
+  else if(profile?.assigned_seller_id) q=q.eq('seller_id',profile.assigned_seller_id);
+  else {favorites=new Set();return;}
+  const {data,error}=await q;
+  if(error){console.error('loadFavorites',error);favorites=new Set();return;}
+  favorites=new Set((data||[]).map(x=>x.service_id).filter(Boolean));
+}
+async function toggleFavorite(s){
+  const isAdmin=profile?.role==='admin' && !seller;
+  if(!seller && !isAdmin){alert('No hay un vendedor asignado a esta cuenta.');return;}
+  if(favorites.has(s.service_id)){
+    let q=sb.from('smm_seller_favorite_services').delete().eq('service_id',s.service_id);
+    q=isAdmin?q.eq('seller_code','ADMIN'):q.eq('seller_id',seller.id);
+    const {error}=await q;
+    if(error){alert('No se pudo quitar de favoritos: '+error.message);return;}
+    favorites.delete(s.service_id);
+  }else{
+    const row={
+      seller_id:isAdmin?null:seller.id,
+      seller_name:isAdmin?'ADMIN':seller.name,
+      seller_code:isAdmin?'ADMIN':seller.short_code,
+      function_name:s.function_label,
+      provider_id:s.provider_id,
+      service_code:s.service_code,
+      service_id:s.service_id,
+      is_favorite:true
+    };
+    const {error}=await sb.from('smm_seller_favorite_services').upsert(row,{onConflict:'seller_code,provider_id,service_code'});
+    if(error){alert('No se pudo agregar a favoritos: '+error.message);return;}
+    favorites.add(s.service_id);
+  }
+  await loadFavorites();
+  if(currentView==='favorites') return renderFavorites();
+  document.querySelectorAll(`[data-fav="${s.service_id}"]`).forEach(btn=>btn.textContent=favorites.has(s.service_id)?'★ Quitar favorito':'☆ Agregar favorito');
+}
+
+async function renderFavorites(){
+  const main=document.getElementById('main');
+  main.innerHTML=`<section class="hero"><div><h1>Tus <span class="gradient">Favoritos</span></h1><p>Acá ves sus métricas actualizadas, cambios de precio y estado operativo.</p></div></section><div id="favArea" class="empty">Cargando...</div>`;
+  if(!favorites.size){document.getElementById('favArea').innerHTML='Todavía no guardaste favoritos.';return;}
+  const ids=[...favorites];
+  const {data,error}=await sb.from('smm_service_live_cards').select('*').in('service_id',ids);
+  if(error){document.getElementById('favArea').innerHTML=esc(error.message);return;}
+  currentServices=(data||[]).filter(isInstagramService); const median=categoryMedianPrice(currentServices); currentServices.sort((a,b)=>desirabilityScore(b,median)-desirabilityScore(a,median)||comparePrice(a,b)); document.getElementById('favArea').outerHTML=`<div id="favArea">${renderServices(currentServices)}${copyBar()}</div>`;wireServiceInteractions(currentServices);
+}
+
+async function renderTop(){
+  const main=document.getElementById('main'); main.innerHTML=`<section class="hero"><div><h1>Top global <span class="gradient">7 días</span></h1><p>Servicios más copiados por todo el equipo durante los últimos siete días.</p></div></section><div id="topArea" class="card empty">Cargando...</div>`;
+  const {data,error}=await sb.from('smm_global_top_7d').select('*').limit(15);
+  const a=document.getElementById('topArea'); if(error){a.innerHTML=esc(error.message);return;} if(!data?.length){a.innerHTML='Todavía no hay suficientes copias registradas.';return;}
+  a.className='card';a.innerHTML=data.map((x,i)=>`<div class="rank-row"><div class="rank">#${i+1}</div><div><b>${esc(x.function_label)} · ${esc(x.panel_code)} · ID ${esc(x.service_code)}</b><div class="small">${x.health_status.toUpperCase()} · Start ${sec(x.avg_start_seconds)}</div></div><div><b>${x.copies_7d}</b><div class="small">copias</div></div><div>${money(x.current_price)}</div></div>`).join('');
+}
+
+async function renderAdmin(){
+  const main=document.getElementById('main'); if(profile.role!=='admin'){return renderHome();}
+  main.innerHTML=`<section class="hero"><div><h1>Administración</h1><p>Usuarios, accesos y sincronización de paneles SMM.</p></div></section>
+  <div class="card admin-card" style="margin-bottom:18px">
+    <div style="display:flex;gap:16px;align-items:center;justify-content:space-between;flex-wrap:wrap">
+      <div><h3 style="margin:0 0 6px">Sincronización SMM</h3><div class="small">JAP · HON · FLW · BLKM → Instagram</div></div>
+      <button class="primary" id="syncPanels">SINCRONIZAR PANELES</button>
+    </div>
+    <div id="syncResult" class="small" style="margin-top:14px">Todavía no ejecutaste una sincronización desde esta sesión.</div>
+  </div>
+  <div class="admin-grid"><div class="card admin-card"><h3>Solicitudes pendientes</h3><div id="pending">Cargando...</div></div><div class="card admin-card"><h3>Usuarios</h3><div id="users">Cargando...</div></div></div>`;
+  document.getElementById('syncPanels').onclick=syncPanels;
+  const [{data:profiles,error},{data:sellers}]=await Promise.all([sb.from('smm_user_profiles').select('*').order('created_at',{ascending:false}),sb.from('smm_sellers').select('*').order('name')]);
+  if(error){document.getElementById('pending').textContent=error.message;return;}
+  const smap=new Map((sellers||[]).map(s=>[s.id,s]));
+  const pend=(profiles||[]).filter(p=>p.status==='pending');
+  document.getElementById('pending').innerHTML=pend.length?pend.map(p=>adminRequest(p,smap)).join(''):'Sin pendientes.';
+  document.getElementById('users').innerHTML=(profiles||[]).filter(p=>p.status!=='pending').map(p=>`<div class="request"><div><b>${esc(smap.get(p.assigned_seller_id)?.name||'Sin vendedor')}</b><div class="small">${esc(p.email_norm)} · ${esc(p.status)} · ${esc(p.role)}</div></div><div class="request-actions">${p.status==='active'?`<button data-suspend="${p.user_id}">Suspender</button><button class="bad" data-expel="${p.user_id}">Expulsar</button>`:''}${p.status==='suspended'?`<button class="ok" data-reactivate="${p.user_id}">Reactivar</button>`:''}</div></div>`).join('')||'Sin usuarios.';
+  wireAdmin();
+}
+
+async function syncPanels(){
+  const btn=document.getElementById('syncPanels');
+  const box=document.getElementById('syncResult');
+  if(!btn || !box) return;
+  btn.disabled=true;
+  btn.textContent='SINCRONIZANDO...';
+  box.textContent='Consultando JAP, HON, FLW y BLKM. Puede tardar unos segundos...';
+  try{
+    const {data,error}=await sb.functions.invoke('smm-sync-services',{body:{source:'admin-ui'}});
+    if(error) throw error;
+    const results=data?.results||[];
+    box.innerHTML=results.length ? results.map(r=>{
+      const status=r.ok?'✓':'✕';
+      const detail=r.ok ? `Traídos: ${r.fetched??0} · Instagram: ${r.instagram??0} · Precios nuevos/cambiados: ${r.changedPrices??0}` : esc(r.error||'Error desconocido');
+      return `<div style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,.08)"><b>${status} ${esc(r.provider)}</b> · ${detail}</div>`;
+    }).join('') : 'La función respondió sin resultados.';
+    const {count}=await sb.from('smm_services').select('*',{count:'exact',head:true}).eq('platform','Instagram');
+    box.innerHTML += `<div style="padding-top:10px"><b>Total Instagram guardados: ${count??0}</b></div>`;
+  }catch(e){
+    box.textContent='Error de sincronización: '+(e?.message||String(e));
+  }finally{
+    btn.disabled=false;
+    btn.textContent='SINCRONIZAR PANELES';
+  }
+}
+
+function adminRequest(p,smap){
+  const req=smap.get(p.requested_seller_id);
+  return `<div class="request"><div><b>${esc(req?.name||'Sin vendedor')}</b><div class="small">${esc(p.email_norm)}</div></div><div class="request-actions"><button class="ok" data-approve="${p.user_id}" data-seller="${p.requested_seller_id||''}">Aprobar</button><button class="bad" data-reject="${p.user_id}">Rechazar</button></div></div>`;
+}
+function wireAdmin(){
+  document.querySelectorAll('[data-approve]').forEach(b=>b.onclick=()=>adminUpdate(b.dataset.approve,{status:'active',assigned_seller_id:b.dataset.seller,approved_at:new Date().toISOString(),approved_by:session.user.id}));
+  document.querySelectorAll('[data-reject]').forEach(b=>b.onclick=()=>adminUpdate(b.dataset.reject,{status:'rejected'}));
+  document.querySelectorAll('[data-suspend]').forEach(b=>b.onclick=()=>adminUpdate(b.dataset.suspend,{status:'suspended'}));
+  document.querySelectorAll('[data-reactivate]').forEach(b=>b.onclick=()=>adminUpdate(b.dataset.reactivate,{status:'active'}));
+  document.querySelectorAll('[data-expel]').forEach(b=>b.onclick=()=>adminUpdate(b.dataset.expel,{status:'expelled'}));
+}
+async function adminUpdate(user_id,patch){const {error}=await sb.from('smm_user_profiles').update(patch).eq('user_id',user_id);if(error)alert(error.message);else renderAdmin();}
+
+async function logout(){await sb.auth.signOut();session=null;profile=null;seller=null;renderAuth('login')}
+init();

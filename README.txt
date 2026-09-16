@@ -16,3 +16,14 @@ IMPORTANTE
 
 SIGUIENTE PASO
 Conectar las API keys como secretos del backend y ejecutar sincronizacion de services/prices/status.
+
+V5 - SUBCATEGORIAS INTELIGENTES
+- Todas las categorías de Instagram se dividen en HQ / Standard / Targeted.
+- Targeted incluye USA, United States, países, estados y señales geo/target.
+- HQ incluye HQ, High Quality, Premium y señales claras de usuarios/cuentas reales.
+- Standard contiene servicios normales/económicos sin HQ ni targeting.
+- Best Seller suma puntos en cualquier subcategoría.
+- Low Popularity / Low Demand queda fuera del ranking recomendado.
+- Targeted no es penalizado fuertemente por precio porque normalmente es más costoso.
+- Followers incorpora capacidad Min/Max al ranking; límites máximos muy bajos pierden puntos.
+- Cada subcategoría muestra hasta 15 tops independientes.
